@@ -2,7 +2,7 @@
 
 Quark VFS 为本地 Agent 提供夸克网盘文件访问接口。目标工作流是下载资料、在本地处理、显式上传产物；多端访问沿用现有夸克客户端。
 
-当前版本 `0.1.0` 已实现本地诊断、认证入口、共用文件核心及受控 CLI，包括上传下载、移动重命名、远端清单回收与恢复。M0 能力审计与 M1 真实验收已完成，包括文件/目录往返、移动重命名、冲突处理、逐项任务恢复，以及本地数据库遗失后的回收重建。这里的完成指 M1 核心工作流；批量重命名、搜索过滤等接口差异见 [能力矩阵](CAPABILITIES.md)。当前本机配置已启用文件与回收接口；MCP、归档替换和官方下载续传门禁保持关闭。
+当前版本 `0.1.0` 已实现本地诊断、认证入口、共用文件核心及受控 CLI，包括上传下载、移动重命名、远端清单回收与恢复。M0 能力审计与 M1 真实验收已完成，包括文件/目录往返、移动重命名、冲突处理、逐项任务恢复，以及本地数据库遗失后的回收重建。这里的完成指 M1 核心工作流；批量重命名、搜索过滤等接口差异见 [能力矩阵](CAPABILITIES.md)。文件与回收接口需通过配置显式启用；MCP、归档替换和官方下载续传门禁保持关闭。
 
 ## 安装与运行
 
@@ -14,9 +14,9 @@ uv run --locked quark-vfs version
 uv run --locked quark-vfs doctor
 ```
 
-本机已将 wheel 安装为 `~/.local/bin/quark-vfs`，配置位于 `~/.config/quark-vfs/config.toml`；薄 skill 安装在 `~/.codex/skills/quark-vfs`，源码版本在 [skills/quark-vfs](skills/quark-vfs/SKILL.md)。其他机器仍需独立配置并验收。
+CLI 可通过项目虚拟环境运行，也可构建 wheel 后单独安装。将配置保存在源码仓库之外的私有目录；薄 skill 的源码位于 [skills/quark-vfs](skills/quark-vfs/SKILL.md)，可按目标 Agent 的目录规则安装。
 
-本轮在 macOS、Python 3.12 验收。其他平台未验收；Artifact 安全读取依赖 `O_NOFOLLOW` 和 `os.open(dir_fd=...)`，缺失时返回 `PATH_CHECK_UNAVAILABLE`。
+已在 macOS、Python 3.12 环境完成验收。其他平台未验收；Artifact 安全读取依赖 `O_NOFOLLOW` 和 `os.open(dir_fd=...)`，缺失时返回 `PATH_CHECK_UNAVAILABLE`。
 
 尚未提供配置时，`doctor` 返回结构化的配置缺失结果和非零退出码。开发检查可以在未安装官方运行时、未登录网盘的情况下完成。
 
@@ -46,7 +46,7 @@ uv run --locked quark-vfs --config /absolute/path/config.toml status --refresh
 
 `auth login` 启动官方浏览器授权，包装层超时为 180 秒；上游通过服务端页面状态轮询等待授权，轮询截止 60 秒，不使用 localhost callback。`status --refresh` 调用官方 `get-user-info`，只发布受控认证状态，包装层不读取凭证。
 
-2026-10-13 已在私有目录 `~/.local/share/quark-vfs/official/1.0.24` 安装经指纹核查的官方包，真实 `doctor --probe` 返回 Codex，浏览器登录返回 `confirmed`，随后账号刷新返回 `authenticated`。授权 scope 保持未知。受限文档往返烟雾已完成：下载 103 字节测试资料、按下载内容加工产物、上传下载核验，并移入本轮独占回收容器后再次验证两个文件内容。
+集成验收使用经指纹核查的官方 1.0.24 包，验证了 `doctor --probe` 的 Codex 识别、浏览器登录的 `confirmed` 状态及账号刷新的 `authenticated` 状态。授权 scope 保持未知。受限文档往返烟雾已完成：下载 103 字节测试资料、按下载内容加工产物、上传下载核验，并移入本轮独占回收容器后再次验证两个文件内容。
 
 ## 早期 M0 文档往返样例
 
@@ -82,7 +82,7 @@ M0 和 M1 实际样例、负向结果及限制见验收报告。默认冲突失�
 
 ## M1 共用文件接口
 
-通用 CLI 已接入共享 Catalog、Transfers、Operations、Trash 与 SQLite 状态；M1 专项真实验收已通过。`examples/config.toml` 的 `file_operations_enabled`、`trash_enabled` 默认 false，其他安装需按验收结果显式开启，本机配置已开启。MCP、archive_replace、download_resume_verified 继续关闭。
+通用 CLI 已接入共享 Catalog、Transfers、Operations、Trash 与 SQLite 状态；M1 专项真实验收已通过。`examples/config.toml` 的 `file_operations_enabled`、`trash_enabled` 默认 false，部署时需按验收结果显式开启。MCP、archive_replace、download_resume_verified 继续关闭。
 
 先用 `init-scope --parent-fid 0` 创建并精确下载验证项目云 marker，然后才能使用绑定账号 alias 的文件接口。已有 alias 不能自动重绑；本地数据库遗失使用明确的 `bind-scope --scope-uuid UUID --management-parent-fid FID` 验证原命名空间。初始化是显式云写入。
 
@@ -116,10 +116,10 @@ M1 验收脚本的 `--resume-after-search /absolute/path/journal.jsonl` 只接�
 
 ## 将 skill 提供给其他 coding agent
 
-部署分为三个部分：skill 目录提供操作说明；已安装的 `quark-vfs` CLI 执行文件语义；本机配置指向官方运行时、状态、缓存和账号作用域。复制 skill 不会安装 Python 包、Node 或官方运行时，也不会复制登录状态。
+部署分为三个部分：skill 目录提供操作说明；已安装的 `quark-vfs` CLI 执行文件语义；配置文件指向官方运行时、状态、缓存和账号作用域。复制 skill 不会安装 Python 包、Node 或官方运行时，也不会复制登录状态。
 
-同一台机器、同一用户下，可将 `~/.codex/skills/quark-vfs` 整个目录复制到目标 Agent 支持的 skills 目录。本机已安装一份到 `~/Documents/我的/.agents/skills/quark-vfs`，包含 `SKILL.md`、CLI 参考和本机绝对路径说明；从该工作目录执行 CLI 本地 status 已通过。目录发现取决于 Agent，本轮完整宿主验收只有 Codex。其他 Agent 还须具备命令执行、文件和网络权限，并验证官方运行时对其真实上下文的支持；不伪造 Agent 标识。
+将仓库中的 `skills/quark-vfs` 整个目录复制到目标 Agent 支持的 skills 目录，例如 `<project>/.agents/skills/quark-vfs`。保留 `SKILL.md` 和引用文件，并在安装副本中记录 CLI 与配置文件的绝对路径。安装后从目标工作目录运行 `status` 检查配置和运行条件。目录发现取决于 Agent；目前完成完整宿主验收的是 Codex。其他 Agent 还须具备命令执行、文件和网络权限，并验证官方运行时对其真实上下文的支持；不伪造 Agent 标识。
 
 迁移到另一台机器时，要另外安装 CLI、Node 和官方运行时，填写该机器的绝对路径，并独立完成官方登录与作用域绑定。不要将认证目录或数据库当作 skill 一起分发。
 
-现有安装采用复制，因此不会自动同步更新。新增命令、参数、能力或使用限制时，更新 CLI 后同步 skill 及其引用；仅内部修复、调用契约不变时可只更新 CLI。运行时路径变化则更新安装副本的 `references/local-runtime.md`。共享发布时以仓库 `skills/quark-vfs` 为说明源，本机路径说明由安装过程补充，不把个人路径当作跨机器配置。
+通过复制安装的 skill 不会自动同步更新。新增命令、参数、能力或使用限制时，更新 CLI 后同步 skill 及其引用；仅内部修复、调用契约不变时可只更新 CLI。运行时路径变化时，更新安装副本中的入口说明。共享发布以仓库 `skills/quark-vfs` 为说明源，具体路径由各部署环境填写。
