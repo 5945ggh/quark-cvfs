@@ -1,0 +1,4 @@
+interface:
+  display_name: "文档写作风格"
+  short_description: "用简明中文直接说明事实、行为、证据与结论，保留影响理解的必要限定"
+  default_prompt: "使用 $document-writing-style 将这份项目文档写得直接、准确、简明。"

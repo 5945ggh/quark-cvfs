@@ -1,0 +1,25 @@
+# Replace all example paths with fixed paths outside source repositories.
+[runtime]
+node_executable = "/absolute/path/to/node"
+official_entry = "/absolute/path/to/quarkclouddrive/scripts/quark-drive.cjs"
+expected_version = "1.0.24"
+timeout_seconds = 10
+max_output_bytes = 65536
+
+[local]
+state_dir = "/absolute/private/path/quark-vfs/state"
+cache_dir = "/absolute/private/path/quark-vfs/cache"
+
+[account]
+# A local scope alias, never an asserted upstream user ID.
+name = "default"
+# Set only to a verified project trash directory FID, or use init-scope output.
+# trash_root_fid = "<complete FID>"
+# trash_root_parent_fid = "<known parent FID>"
+
+[features]
+file_operations_enabled = false
+trash_enabled = false
+mcp_verified = false
+archive_replace_verified = false
+download_resume_verified = false
