@@ -1,0 +1,19 @@
+README.md
+  s_d6ed045f1d5fdf::t_ca98db34b73017 5,17,19,49,85,119,121,125
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "1427ee185c1f43ca598a01be74ef741caa1036b8",
+  "prompts": {},
+  "sessions": {
+    "s_d6ed045f1d5fdf": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a130c2-440f-7160-9864-ac671d3bb346",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "5945ggh <1282835294@qq.com>"
+    }
+  }
+}
