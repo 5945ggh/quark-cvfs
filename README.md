@@ -27,7 +27,7 @@ uv run --locked quark-vfs --config /absolute/path/config.toml doctor
 uv run --locked quark-vfs --config /absolute/path/config.toml status
 ```
 
-这两个调用默认检查本地配置、运行条件与本地命名空间绑定记录。`status` 不进行账号探活，不读取凭证；认证状态保持未知。
+`doctor` 和默认 `status` 检查本地配置、运行条件与本地绑定记录。`status` 默认不探测账号或云端 marker，也不读取凭证；认证状态保持未知。`status --verify-scope` 显式只读检查云端 marker，可与 `--refresh` 组合；`--refresh` 本身只刷新登录状态。验证状态为 `not_checked`、`passed`、`mismatch` 或 `unavailable`，其中 `unavailable` 表示验证未完成。
 
 显式添加 `--probe` 会执行官方 `resolve-agent`：
 
@@ -84,7 +84,7 @@ M0 和 M1 实际样例、负向结果及限制见验收报告。默认冲突失�
 
 通用 CLI 已接入共享 Catalog、Transfers、Operations、Trash 与 SQLite 状态；M1 专项真实验收已通过。`examples/config.toml` 的 `file_operations_enabled`、`trash_enabled` 默认 false，部署时需按验收结果显式开启。MCP、archive_replace、download_resume_verified 继续关闭。
 
-先用 `init-scope --parent-fid 0` 创建并精确下载验证项目云 marker，然后才能使用绑定账号 alias 的文件接口。已有 alias 不能自动重绑；本地数据库遗失使用明确的 `bind-scope --scope-uuid UUID --management-parent-fid FID` 验证原命名空间。初始化是显式云写入。
+先用 `init-scope --parent-fid 0` 创建并精确下载验证项目云 marker，然后才能使用绑定账号 alias 的文件接口；工具自动生成 scope UUID。已有 alias 不能自动重绑；本地数据库遗失时使用明确的 `bind-scope --scope-uuid UUID --management-parent-fid FID` 验证原命名空间。初始化是显式云写入。详细恢复分支见 [RECOVERY.md](RECOVERY.md)。
 
 文件引用以 JSON 明确给出，例如 `--ref '{"fid":"完整FID","parent_fid_hint":"明确父FID"}'` 或 `--ref '{"path":"/资料/笔记.md"}'`；不接受自然语言命令或原始上游参数。主要入口：
 
@@ -103,7 +103,11 @@ quark-vfs --config /absolute/path/config.toml jobs
 quark-vfs --config /absolute/path/config.toml rebuild-trash
 ```
 
+`tree` 按明确起点和深度浏览目录树，默认深度 2、目录预算 100、显示条目预算 1000，默认 JSON 输出。预算耗尽或分支失败时保留已读结果并标记 partial；它不代表全盘清单或原子快照。参数、预算边界与 partial 语义见 [CLI 工作流](skills/quark-vfs/references/cli.md#tree)。本地验证及真实网盘验收状态见[验收记录](docs/VERIFICATION.md)。
+
 冲突默认 fail，支持的写操作可显式 keep_both。回收根目录采用配置 `trash_root_fid`，未配置时使用已验证的项目管理根。正式回收的 manifest、恢复事件及本地库遗失处理见 [RECOVERY.md](RECOVERY.md)。
+
+必须保留 `QuarkVFS-<UUID>` 管理根、marker 和配置的回收根。作用域恢复及离线任务边界见 [RECOVERY.md](RECOVERY.md)。
 
 通用传输单文件上限为 128 MiB；这是包装层的本地保护值，不是已确认的夸克容量上限，超过或无法安全确认大小时返回明确错误。`jobs --job-id UUID --resume` 对下载采用 fresh 来源和新 staging 安全重启，不声称 offset 续传；未知上传、移动或重命名先核对，拒绝自动重放。
 

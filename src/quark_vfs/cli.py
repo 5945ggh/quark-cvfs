@@ -1,4 +1,4 @@
-"""JSON-only command interface; default diagnostics never launch Node."""
+"""JSON command interface with explicit tree text output."""
 import argparse
 import json
 import uuid
@@ -33,6 +33,7 @@ class Parser(argparse.ArgumentParser):
 
 def main(argv=None) -> int:
     result: Envelope = {"ok": True, "operation_id": str(uuid.uuid4()), "data": {}, "warnings": []}
+    output_format = 'json'
     try:
         parser = Parser(description="M0 local diagnostics for the official Quark runtime")
         parser.add_argument("--config", help="Explicit TOML configuration path")
@@ -42,12 +43,15 @@ def main(argv=None) -> int:
         doctor.add_argument("--probe", action="store_true", help="Execute official resolve-agent with the real inherited environment; upstream initialization and network telemetry may occur")
         status = commands.add_parser("status")
         status.add_argument("--refresh", action="store_true", help="Query official account status over the network; account details are suppressed")
+        status.add_argument("--verify-scope", action="store_true", help="Read the bound cloud marker without changing the binding")
         auth = commands.add_parser("auth")
         auth.add_subparsers(dest="auth_command", required=True, parser_class=Parser).add_parser("login", help="Start official browser authorization and wait for its confirmation")
         verification = commands.add_parser("verify-workflow", help="Run a synthetic document round trip in new UUID cloud directories; preserve evidence and stop on uncertain outcomes")
         verification.add_argument("--resume", help="Resume only a recorded successful-source-upload M0 checkpoint by canonical UUID; never repeats its upload")
         _add_file_commands(commands)
         args = parser.parse_args(argv)
+        if args.command == 'tree':
+            output_format = args.format
         if args.command == "version":
             result["data"] = {"wrapper_version": __version__, "protocol_version": 1}
         else:
@@ -57,11 +61,14 @@ def main(argv=None) -> int:
             if args.command in _FILE_COMMANDS:
                 result["data"] = _jsonable(_file_dispatch(args, config))
                 data = result["data"]
-                if isinstance(data, dict) and data.get("state") in ("partial", "failed", "needs_reconciliation"):
+                if args.command == 'tree' and not data['complete_for_depth']:
+                    result['ok'] = False
+                    result['error'] = {'code': 'TREE_INCOMPLETE', 'message': 'Requested depth is incomplete because a budget was reached or a directory branch could not be listed.', 'retryable': False}
+                elif not (args.command == "jobs" and not args.resume) and isinstance(data, dict) and data.get("state") in ("partial", "failed", "needs_reconciliation"):
                     result["ok"] = False
                     error_code = "OUTCOME_UNKNOWN" if data["state"] == "needs_reconciliation" else "PARTIAL_FAILURE"
                     result["error"] = {"code": error_code, "message": "Operation did not fully succeed; preserve successful items and reconcile recorded outcomes.", "retryable": False}
-                print(json.dumps(result, ensure_ascii=False))
+                _print_result(result, output_format)
                 return 0 if result["ok"] else 1
             result["data"] = {
                 "wrapper_version": __version__, "protocol_version": 1,
@@ -88,7 +95,22 @@ def main(argv=None) -> int:
                 result["data"]["identity_probe"] = "passed"
             if args.command == "status" and args.refresh:
                 result["warnings"].append("Official account status refresh contacts upstream services; raw account details are suppressed.")
-                result["data"].update(refresh_status(config))
+                try:
+                    result['data'].update(refresh_status(config))
+                except (VfsError, OSError) as error:
+                    result['ok'] = False
+                    result['error'] = _safe_error(error, stage='authentication_refresh')
+                    result['data']['authentication_error'] = result['error']
+            if args.command == 'status' and args.verify_scope:
+                namespace = result['data']['local_namespace']
+                try:
+                    _verify_namespace(config)
+                    namespace.update(live_marker_checked=True, scope_verification='passed')
+                except (VfsError, OSError) as error:
+                    mismatch = getattr(error, 'code', None) in ('SCOPE_MISMATCH', 'SCOPE_MARKER_MISSING')
+                    namespace.update(live_marker_checked=mismatch, scope_verification='mismatch' if mismatch else 'unavailable', verification_error=_safe_error(error, stage='scope_binding'))
+                    result['ok'] = False
+                    result.setdefault('error', namespace['verification_error'])
             if args.command == "auth":
                 result["warnings"].append("Official runtime attempts to open its authorization page; complete authorization in your browser. Credentials remain managed by the official runtime.")
 
@@ -104,7 +126,7 @@ def main(argv=None) -> int:
                 result["data"].update(verify_workflow(config, resume=args.resume))
     except (ConfigError, ProviderError, VfsError, TrashError) as exc:
         result["ok"] = False
-        result["error"] = {"code": exc.code, "message": str(exc), "retryable": bool(getattr(exc, "retryable", False))}
+        result["error"] = _safe_error(exc)
         for field in ("job_id", "operation_id", "scope_uuid"):
             value = getattr(exc, field, None)
             if isinstance(value, str):
@@ -116,8 +138,57 @@ def main(argv=None) -> int:
     except OSError:
         result["ok"] = False
         result["error"] = {"code": "LOCAL_IO_ERROR", "message": "A local runtime or filesystem check failed; raw system details are suppressed.", "retryable": False}
-    print(json.dumps(result, ensure_ascii=False))
+    _print_result(result, output_format)
     return 0 if result["ok"] else 1
+
+
+def _terminal_safe(value: str) -> str:
+    import unicodedata
+    escaped = {'\n': r'\n', '\r': r'\r', '\t': r'\t', '\\': r'\\'}
+    return ''.join(escaped.get(char, f'\\u{ord(char):04x}' if unicodedata.category(char).startswith('C') or char in '\u2028\u2029' else char)
+                   for char in value)
+
+
+def _print_result(result: Envelope, output_format: str) -> None:
+    if output_format == 'json':
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    data = result.get('data', {})
+    if 'root' in data:
+        def render(node, prefix='', connector=''):
+            label = _terminal_safe(node['name'])
+            if node['kind'] == 'directory' and not label.endswith('/'):
+                label += '/'
+            status = node.get('listing_status')
+            if status and status != 'complete':
+                label += f' [{status}]'
+            if node.get('error'):
+                error = node['error']
+                label += ' ' + _terminal_safe(f"{error['code']}: {error['message']}")
+            if 'omitted_entries' in node:
+                label += f" [omitted_entries={node['omitted_entries']}]"
+            print(prefix + connector + label)
+            children = node.get('children', [])
+            child_prefix = prefix + ('    ' if connector == '└── ' else '│   ' if connector else '')
+            for index, child in enumerate(children):
+                render(child, child_prefix, '└── ' if index == len(children) - 1 else '├── ')
+        render(data['root'])
+        limits, stats = data['limits'], data['stats']
+        print(f"depth={data['requested_depth']} max_directories={limits['max_directories']} max_entries={limits['max_entries']}")
+        print('统计（仅显示范围，非全盘）：' + ' '.join(f'{key}={value}' for key, value in stats.items()))
+        print('一致性：每个目录独立快照；多目录结果非原子快照。')
+    if result.get('error'):
+        error = result['error']
+        print(_terminal_safe(f"Error {error['code']}: {error['message']}"))
+
+
+def _bounded_int(minimum: int, maximum: int):
+    def parse(value: str) -> int:
+        number = int(value)
+        if not minimum <= number <= maximum:
+            raise argparse.ArgumentTypeError(f'Expected an integer from {minimum} to {maximum}.')
+        return number
+    return parse
 
 
 def _jsonable(value):
@@ -140,6 +211,9 @@ def _ref(value: str, account: str):
         fields = json.loads(value)
         if not isinstance(fields, dict) or set(fields) - {'fid', 'path', 'parent_fid_hint'}:
             raise ValueError
+        if any(item is not None and (not isinstance(item, str) or not item)
+               for item in fields.values()):
+            raise ValueError
         return FileRef(account=account, **fields)
     except (ValueError, TypeError):
         raise VfsError('INVALID_REFERENCE', 'Use a JSON reference with fid or absolute path and optional parent_fid_hint.') from None
@@ -157,6 +231,12 @@ def _add_file_commands(commands):
     listing.add_argument('--ref', required=True)
     listing.add_argument('--page-size', type=int, default=100)
     listing.add_argument('--page-token')
+    tree = commands.add_parser('tree', help='Read a bounded directory tree; directories at the requested depth remain unexpanded')
+    tree.add_argument('--ref', required=True, help='JSON file reference with fid or absolute path')
+    tree.add_argument('--depth', type=_bounded_int(0, 32), default=2, help='Requested depth from 0 to 32 (default: 2)')
+    tree.add_argument('--max-directories', type=_bounded_int(1, 1000), default=100, help='Directory listing budget from 1 to 1000 (default: 100)')
+    tree.add_argument('--max-entries', type=_bounded_int(1, 10000), default=1000, help='Displayed entry budget from 1 to 10000 (default: 1000)')
+    tree.add_argument('--format', choices=('json', 'text'), default='json', help='Output format (default: json)')
     stat = commands.add_parser('stat')
     stat.add_argument('--ref', required=True)
     stat.add_argument('--cached', action='store_true')
@@ -197,7 +277,7 @@ def _add_file_commands(commands):
         command.add_argument('--conflict', choices=('fail', 'keep_both'), default='fail')
 
 
-_FILE_COMMANDS = {'init-scope', 'bind-scope', 'list', 'stat', 'search', 'mkdir', 'upload', 'download',
+_FILE_COMMANDS = {'init-scope', 'bind-scope', 'list', 'tree', 'stat', 'search', 'mkdir', 'upload', 'download',
                   'move', 'rename', 'trash', 'restore', 'jobs', 'rebuild-trash'}
 
 
@@ -281,8 +361,15 @@ def _file_dispatch(args, config):
     from .models import VfsError
     from .provider.quark import QuarkProvider
     from .storage import Store
+    if args.command == 'jobs':
+        if args.resume and not args.job_id:
+            raise VfsError('INVALID_ARGUMENT', 'jobs --resume requires --job-id.')
+        if not args.resume:
+            from .storage import read_local_jobs
+            return read_local_jobs(config.state_dir / 'quark-vfs.sqlite3', config.account, args.job_id)
     if not config.file_operations_enabled:
         raise VfsError('CAPABILITY_UNVERIFIED', 'Enable file_operations_enabled explicitly after the required verification.')
+    tree_ref = _ref(args.ref, config.account) if args.command == 'tree' else None
     store = Store(config.state_dir / 'quark-vfs.sqlite3')
     provider = QuarkProvider(config)
     try:
@@ -293,6 +380,9 @@ def _file_dispatch(args, config):
             if args.command == 'bind-scope':
                 return _bind_scope(config, provider, store, args)
             catalog = Catalog(provider, store, config.cache_dir / 'core')
+            if args.command == 'tree':
+                return catalog.tree(tree_ref, depth=args.depth,
+                                    max_directories=args.max_directories, max_entries=args.max_entries)
             catalog.assert_scope(config.account)
             if config.trash_root_fid:
                 from .models import FileRef
@@ -313,11 +403,6 @@ def _file_dispatch(args, config):
                         'metadata_freshness': 'cached' if cached is not None else 'fresh'}
             if args.command == 'search':
                 return catalog.search(config.account, args.keyword, args.parent_fid)
-            if args.command == 'jobs' and not args.resume:
-                return store.job(config.account, args.job_id) if args.job_id else {
-                    'jobs': store.jobs(config.account),
-                    'trash_operations': store.list_documents(config.account, 'trash'),
-                    'scope_initializations': store.list_documents(config.account, 'bootstrap')}
             from .core.operations import Operations
             from .core.transfers import Transfers
             operations = Operations(catalog, store)
@@ -484,9 +569,9 @@ def _local_namespace_status(config):
     from urllib.parse import quote
     path = config.state_dir / 'quark-vfs.sqlite3'
     if not path.exists():
-        return {'binding': 'unbound', 'upstream_account_id': 'unknown'}
+        return {'binding': 'unbound', 'upstream_account_id': 'unknown', 'live_marker_checked': False, 'scope_verification': 'not_checked'}
     if any(parent.is_symlink() for parent in (path, *path.parents)):
-        return {'binding': 'unknown', 'upstream_account_id': 'unknown'}
+        return {'binding': 'unknown', 'upstream_account_id': 'unknown', 'live_marker_checked': False, 'scope_verification': 'not_checked'}
     try:
         database = sqlite3.connect('file:' + quote(str(path)) + '?mode=ro', uri=True)
         try:
@@ -494,15 +579,17 @@ def _local_namespace_status(config):
         finally:
             database.close()
         if row is None:
-            return {'binding': 'unbound', 'upstream_account_id': 'unknown'}
+            return {'binding': 'unbound', 'upstream_account_id': 'unknown', 'live_marker_checked': False, 'scope_verification': 'not_checked'}
         binding = json.loads(row[0])
         identifier = str(uuid.UUID(binding['scope_uuid']))
         if binding['account'] != config.account or identifier != binding['scope_uuid']:
             raise ValueError
-        return {'binding': 'bound', 'scope_uuid': identifier, 'live_marker_checked': False,
+        return {'binding': 'bound', 'scope_uuid': identifier, 'live_marker_checked': False, 'scope_verification': 'not_checked',
+                'marker_fid': binding.get('marker_fid'), 'marker_name': binding.get('marker_name'),
+                'management_root_fid': binding.get('marker_parent_fid'),
                 'upstream_account_id': 'unknown'}
     except (sqlite3.Error, OSError, ValueError, TypeError, KeyError):
-        return {'binding': 'unknown', 'upstream_account_id': 'unknown'}
+        return {'binding': 'unknown', 'upstream_account_id': 'unknown', 'live_marker_checked': False, 'scope_verification': 'not_checked'}
 
 
 def _bootstrap_entries(provider, account, parent_fid, predicate):
@@ -514,3 +601,68 @@ def _bootstrap_entries(provider, account, parent_fid, predicate):
         if predicate(rows):
             return rows
     raise VfsError('OUTCOME_UNKNOWN', 'Acknowledged namespace changes were not uniquely visible after bounded read-only checks; mutations were not repeated.')
+
+
+def _safe_error(error, *, stage=None):
+    code = getattr(error, 'code', 'LOCAL_IO_ERROR')
+    if isinstance(error, (ConfigError, TrashError)) or isinstance(error, VfsError) and not isinstance(error, ProviderError):
+        message = str(error)
+    elif isinstance(error, ProviderError):
+        message = _diagnostic_message(code, None)
+    else:
+        message = 'Local diagnostic check failed; raw details are suppressed.'
+    result = {'code': code, 'message': message,
+              'retryable': bool(getattr(error, 'retryable', False))}
+    failure_stage = getattr(error, 'stage', None) or stage
+    if failure_stage:
+        result.update(stage=failure_stage, message=_diagnostic_message(result['code'], failure_stage))
+    for field in ('upstream_code', 'exit_code'):
+        value = getattr(error, field, None)
+        if type(value) is int:
+            result[field] = value
+    return result
+
+
+def _verify_namespace(config):
+    from .core.catalog import Catalog
+    from .provider.quark import QuarkProvider
+    from .storage import Store
+    store = Store(config.state_dir / 'quark-vfs.sqlite3', read_only=True)
+    try:
+        Catalog(QuarkProvider(config), store, config.cache_dir / 'scope-check').assert_scope(config.account, fresh=True)
+    finally:
+        store.close()
+
+
+def _diagnostic_message(code, stage):
+    if code == 'CONFIG_REQUIRED':
+        return 'Provide --config /absolute/path/config.toml; no runtime is discovered automatically.'
+    if code == 'INVALID_ARGUMENT':
+        return 'Invalid command arguments; use --help for supported options.'
+    if code == 'RUNTIME_UNSAFE':
+        return 'Local runtime checks failed; inspect data.checks and configure safe existing directories.'
+    if code == 'SCOPE_MARKER_MISSING':
+        return 'The bound marker was absent from a successful directory listing. Check the original management directory in the Quark client.'
+    if code == 'SCOPE_MISMATCH':
+        if stage == 'scope_marker_content':
+            return 'The downloaded marker name, path or content does not match the local binding.'
+        return 'The observed marker identity, name, type or bounded size does not match the local binding.'
+    if code == 'ACCOUNT_UNBOUND':
+        return 'No local scope binding exists for this account alias.'
+    if code == 'AUTH_REQUIRED':
+        return 'Official browser authorization is required; run auth login to complete authorization.'
+    if code == 'STATE_NOT_FOUND':
+        return 'The local state database does not exist; scope verification was not started.'
+    if code == 'STATE_UNREADABLE':
+        return 'The local state database could not be read; scope verification was not started.'
+    if stage == 'scope_directory_read':
+        return 'The management directory listing could not be completed. This does not establish that the directory was deleted.'
+    if stage == 'scope_marker_download':
+        return 'The marker download could not be completed; the scope remains unverified.'
+    if stage == 'scope_marker_content':
+        return 'The local marker read could not be completed safely; the scope remains unverified.'
+    if stage == 'authentication_refresh':
+        return 'The account status refresh could not be completed; raw upstream details are suppressed.'
+    if stage is None:
+        return 'The official operation was not confirmed; inspect the safe error codes before retrying.'
+    return 'The diagnostic check could not be completed; inspect the safe stage and codes before recovery.'

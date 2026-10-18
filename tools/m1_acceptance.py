@@ -215,7 +215,10 @@ class M1Acceptance:
             if intent.get('event')!='intent' or response.get('event')!='response' or intent['step']!=step or response['step']!=step or intent['argv'][2]!=command:
                 raise VfsError('INVALID_CHECKPOINT','Restore prefix differs.')
             if i in permitted_failures:
-                if result.get('ok') is not False or result.get('error',{}).get('code')!=permitted_failures[i]:
+                local_partial_read = (i == 17 and result.get('ok') is True
+                                      and result.get('data', {}).get('state') == 'partial'
+                                      and result.get('data', {}).get('local_only') is True)
+                if not local_partial_read and (result.get('ok') is not False or result.get('error',{}).get('code')!=permitted_failures[i]):
                     raise VfsError('INVALID_CHECKPOINT','Expected prefix failure differs.')
             elif result.get('ok') is not True:
                 raise VfsError('INVALID_CHECKPOINT','Successful prefix differs.')
@@ -316,7 +319,7 @@ class M1Acceptance:
         if code != 0 or result.get('ok') is not True:
             raise VfsError(result.get('error', {}).get('code', 'OUTCOME_UNKNOWN'), 'CLI acceptance stopped; inspect private intent and response records.')
         data = result['data']
-        if isinstance(data, dict) and data.get('state') in ('failed', 'partial', 'needs_reconciliation'):
+        if not (command == 'jobs' and '--resume' not in arguments) and isinstance(data, dict) and data.get('state') in ('failed', 'partial', 'needs_reconciliation'):
             raise VfsError('OUTCOME_UNKNOWN', 'A batch did not fully complete; do not replay successful items.')
         return data
 
@@ -422,7 +425,9 @@ class M1Acceptance:
         if len(completed) != 1:
             raise VfsError('ACCEPTANCE_FAILED', 'Successful batch item was not recorded.')
         self.call('jobs', '--job-id', partial['job_id'], '--resume', expected_error='NAME_CONFLICT')
-        resumed = self.call('jobs', '--job-id', partial['job_id'], expected_error='PARTIAL_FAILURE')['data']
+        resumed = self.call('jobs', '--job-id', partial['job_id'])
+        if resumed.get('state') != 'partial' or resumed.get('local_only') is not True:
+            raise VfsError('ACCEPTANCE_FAILED', 'Local history did not preserve the partial job state.')
         retained = [item for item in resumed['items'] if item['state'] == 'succeeded']
         if retained != completed:
             raise VfsError('ACCEPTANCE_FAILED', 'Resume changed an already successful item.')

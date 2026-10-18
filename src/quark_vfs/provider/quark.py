@@ -48,7 +48,9 @@ class QuarkProvider:
             raise ProviderError('OUTCOME_UNKNOWN', 'Official final result is missing.', notices=self.last_notices)
         result = transcript.results[0]
         if result.get('action') == 'not_authenticated' and result.get('code') == -1408:
-            raise ProviderError('AUTH_REQUIRED', 'Official browser authorization is required.', notices=self.last_notices)
+            error = ProviderError('AUTH_REQUIRED', 'Official browser authorization is required.', notices=self.last_notices)
+            error.upstream_code, error.exit_code = -1408, output.exit_code
+            raise error
         if result.get('action') != action or type(result.get('code')) is not int:
             raise ProviderError('OUTCOME_UNKNOWN', 'Official final result schema is unrecognized.', notices=self.last_notices)
         return result, transcript, output.exit_code

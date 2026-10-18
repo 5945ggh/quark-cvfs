@@ -177,3 +177,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(value['error']['retryable'])
         self.assertEqual(value['data']['job_id'], 'safe-job')
+
+    def test_trash_and_restore_preserve_actionable_business_errors(self):
+        from quark_vfs.core.trash import TrashError
+        cases = [
+            (['trash', '--ref', '{"fid":"source"}'], 'SOURCE_CHANGED',
+             'Fresh source reference has changed.'),
+            (['restore', '--operation-id', 'operation', '--entry-id', 'entry'], 'NAME_CONFLICT',
+             'Recovery target name already exists; no restore intent or movement was dispatched.'),
+            (['restore', '--operation-id', 'operation', '--entry-id', 'entry'], 'RECONCILIATION_REQUIRED',
+             'A prior recovery attempt must be reconciled before any further movement.'),
+        ]
+        for arguments, error_code, message in cases:
+            with self.subTest(command=arguments[0], error_code=error_code):
+                with patch('quark_vfs.cli._file_dispatch', side_effect=TrashError(error_code, message)) as dispatch:
+                    code, value = self.invoke(['--config', 'examples/config.toml', *arguments])
+                dispatch.assert_called_once()
+                self.assertEqual(code, 1)
+                self.assertFalse(value['ok'])
+                self.assertEqual(value['error'], {'code': error_code, 'message': message, 'retryable': False})
+
+    def test_restore_upstream_error_still_suppresses_raw_details(self):
+        from quark_vfs.provider.quark_cli import ProviderError
+        with patch('quark_vfs.cli._file_dispatch', side_effect=ProviderError('NAME_CONFLICT', 'raw-upstream-secret')):
+            code, value = self.invoke(['--config', 'examples/config.toml', 'restore',
+                                       '--operation-id', 'operation', '--entry-id', 'entry'])
+        self.assertEqual(code, 1)
+        self.assertFalse(value['ok'])
+        self.assertEqual(value['error']['code'], 'NAME_CONFLICT')
+        self.assertNotIn('raw-upstream-secret', json.dumps(value))

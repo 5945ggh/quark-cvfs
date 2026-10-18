@@ -12,8 +12,33 @@ from .models import RemoteEntry, ScopeBinding, VfsError, same_browse_identity
 
 
 class Store:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, read_only: bool = False):
         self.path = Path(path).absolute()
+        self.read_only = read_only
+        self._held = threading.local()
+        if read_only:
+            if any(p.is_symlink() for p in (self.path, *self.path.parents)):
+                raise VfsError("UNSAFE_STATE_PATH", "Database cannot be a symbolic link.")
+            if not self.path.exists():
+                raise VfsError("STATE_NOT_FOUND", "Local state database does not exist.")
+            try:
+                self.db = sqlite3.connect(self.path.as_uri() + '?mode=ro', uri=True)
+                self.db.execute("PRAGMA query_only=ON")
+                self.db.execute("PRAGMA foreign_keys=ON")
+                self.db.execute("SELECT name FROM sqlite_master").fetchall()
+                for table, columns in (
+                    ('bindings', 'account,data'),
+                    ('snapshots', 'id,account,parent,data,started,finished'),
+                    ('documents', 'account,kind,key,data'),
+                    ('jobs', 'id,account,action,state'),
+                    ('job_items', 'job,ordinal,data,state,result'),
+                ):
+                    self.db.execute(f'SELECT {columns} FROM {table} LIMIT 0')
+            except sqlite3.Error:
+                if hasattr(self, 'db'):
+                    self.db.close()
+                raise VfsError("STATE_UNREADABLE", "Local state database cannot be read.") from None
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if any(p.is_symlink() for p in (self.path, *self.path.parents)):
             raise VfsError("UNSAFE_STATE_PATH", "Database cannot be a symbolic link.")
@@ -54,10 +79,18 @@ class Store:
             raise VfsError("SCOPE_ALREADY_BOUND", "Existing aliases cannot silently change account scope; use a new alias and scope.") from None
 
     def binding(self, account: str) -> ScopeBinding:
-        row = self.db.execute("SELECT data FROM bindings WHERE account=?", (account,)).fetchone()
-        if row is None:
+        try:
+            row = self.db.execute("SELECT data FROM bindings WHERE account=?", (account,)).fetchone()
+            binding = ScopeBinding(**json.loads(row[0])) if row is not None else None
+            if self.read_only and binding is not None:
+                validate_binding_fields(binding, account)
+        except (sqlite3.Error, ValueError, TypeError):
+            if not self.read_only:
+                raise
+            raise VfsError('STATE_UNREADABLE', 'Local scope binding cannot be read.') from None
+        if binding is None:
             raise VfsError("ACCOUNT_UNBOUND", "Bind a verified cloud marker before accessing account data.")
-        return ScopeBinding(**json.loads(row[0]))
+        return binding
 
     @contextmanager
     def account_lock(self, account: str):
@@ -156,3 +189,41 @@ class Store:
 
     def jobs(self, account: str) -> tuple[dict, ...]:
         return tuple(self.job(account, r[0]) for r in self.db.execute("SELECT id FROM jobs WHERE account=? ORDER BY rowid DESC", (account,)))
+
+
+def read_local_jobs(path: Path, account: str, job_id: str | None = None) -> dict:
+    """Read durable local history in one SQLite snapshot without cloud validation."""
+    store = Store(path, read_only=True)
+    try:
+        store.db.execute('BEGIN')
+        if job_id is not None:
+            return {**store.job(account, job_id), 'local_only': True}
+        return {
+            'jobs': store.jobs(account),
+            'trash_operations': store.list_documents(account, 'trash'),
+            'scope_initializations': store.list_documents(account, 'bootstrap'),
+            'local_only': True,
+        }
+    except (sqlite3.Error, ValueError, TypeError):
+        raise VfsError('STATE_UNREADABLE', 'Local job history cannot be read.') from None
+    finally:
+        store.close()
+
+
+def validate_binding_fields(binding: ScopeBinding, account: str) -> None:
+    """Validate persisted scope identity before any provider access."""
+    strings = (binding.account, binding.scope_uuid, binding.marker_fid,
+               binding.marker_name, binding.marker_sha256)
+    if (any(not isinstance(value, str) or not value for value in strings)
+            or binding.account != account
+            or binding.marker_name in ('.', '..')
+            or any(character in binding.marker_name for character in ('/', '\\', '\x00'))
+            or len(binding.marker_sha256) != 64
+            or any(character not in '0123456789abcdef' for character in binding.marker_sha256)
+            or binding.marker_parent_fid is not None and (
+                not isinstance(binding.marker_parent_fid, str) or not binding.marker_parent_fid
+                or '\x00' in binding.marker_parent_fid)
+            or '\x00' in binding.marker_fid
+            or binding.marker_size is not None and (
+                type(binding.marker_size) is not int or not 0 <= binding.marker_size <= 65536)):
+        raise VfsError('STATE_UNREADABLE', 'Local scope binding contains invalid identity fields.')

@@ -6,11 +6,15 @@ from typing import Protocol
 
 
 class VfsError(RuntimeError):
-    def __init__(self, code: str, message: str, *, retryable: bool = False, job_id: str | None = None):
+    def __init__(self, code: str, message: str, *, retryable: bool = False, job_id: str | None = None,
+                 stage: str | None = None):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
         self.job_id = job_id
+        self.stage = stage
+        self.upstream_code: int | None = None
+        self.exit_code: int | None = None
 
 
 def same_browse_identity(left: str, right: str) -> bool:
